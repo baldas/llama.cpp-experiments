@@ -1,12 +1,11 @@
 #pragma once
 
-#include "llama.h"
-
-#include "llama-impl.h"
-#include "llama-arch.h"
-#include "llama-mmap.h"
-
 #include "ggml-cpp.h"
+#include "llama-arch.h"
+#include "llama-impl.h"
+#include "llama-mmap.h"
+#include "llama-ondemand.h"
+#include "llama.h"
 
 #include <cstddef>
 #include <map>
@@ -26,20 +25,27 @@ const char * llama_file_version_name(llama_fver version);
 struct llama_model_loader {
     // Holds information on a model weight
     struct llama_tensor_weight {
-        uint16_t  idx; // source file index
-        size_t   offs; // tensor data offset in the original file
+        uint16_t idx;   // source file index
+        size_t   offs;  // tensor data offset in the original file
 
         ggml_tensor * tensor;
 
-        llama_tensor_weight(const llama_file * file, uint16_t idx, const struct gguf_context * gguf_ctx, ggml_tensor * tensor) : idx(idx), tensor(tensor) {
-            const int tensor_idx = gguf_find_tensor(gguf_ctx,  ggml_get_name(tensor));
+        llama_tensor_weight(const llama_file *          file,
+                            uint16_t                    idx,
+                            const struct gguf_context * gguf_ctx,
+                            ggml_tensor *               tensor) :
+            idx(idx),
+            tensor(tensor) {
+            const int tensor_idx = gguf_find_tensor(gguf_ctx, ggml_get_name(tensor));
             if (tensor_idx < 0) {
                 throw std::runtime_error(format("tensor '%s' not found in the model", ggml_get_name(tensor)));
             }
 
             offs = gguf_get_data_offset(gguf_ctx) + gguf_get_tensor_offset(gguf_ctx, tensor_idx);
             if (offs + ggml_nbytes(tensor) < offs || offs + ggml_nbytes(tensor) > file->size()) {
-                throw std::runtime_error(format("tensor '%s' data is not within the file bounds, model is corrupted or incomplete", ggml_get_name(tensor)));
+                throw std::runtime_error(
+                    format("tensor '%s' data is not within the file bounds, model is corrupted or incomplete",
+                           ggml_get_name(tensor)));
             }
         }
     };
@@ -69,65 +75,69 @@ struct llama_model_loader {
     uint64_t n_elements = 0;
     size_t   n_bytes    = 0;
 
-    bool use_mmap = false;
+    bool use_mmap     = false;
+    bool use_ondemand = false;
     bool check_tensors;
 
     llama_files files;
     llama_ftype ftype;
     llama_fver  fver;
 
-    llama_mmaps mappings;
+    llama_mmaps            mappings;
+    llama_ondemand_loaders ondemand_loaders;
 
     std::map<std::string, llama_tensor_weight, weight_name_comparer> weights_map;
-    std::unordered_map<std::string, llama_model_kv_override> kv_overrides;
-    const llama_model_tensor_buft_override * tensor_buft_overrides;
+    std::unordered_map<std::string, llama_model_kv_override>         kv_overrides;
+    const llama_model_tensor_buft_override *                         tensor_buft_overrides;
 
-    gguf_context_ptr meta;
+    gguf_context_ptr              meta;
     std::vector<ggml_context_ptr> contexts;
 
     std::string arch_name;
-    LLM_KV      llm_kv    = LLM_KV(LLM_ARCH_UNKNOWN);
+    LLM_KV      llm_kv = LLM_KV(LLM_ARCH_UNKNOWN);
 
-    size_t size_done = 0;
-    size_t size_data = 0;
+    size_t                                 size_done = 0;
+    size_t                                 size_data = 0;
     std::vector<std::pair<size_t, size_t>> mmaps_used;
 
+    // On-demand loading parameters (stored for use in init_mappings)
+    llama_ondemand_params ondemand_params;
+
     llama_model_loader(
-        const std::string & fname,
-        std::vector<std::string> & splits, // optional, only need if the split does not follow naming scheme
-        bool use_mmap,
-        bool check_tensors,
+        const std::string &             fname,
+        std::vector<std::string> &      splits,  // optional, only need if the split does not follow naming scheme
+        bool                            use_mmap,
+        bool                            use_ondemand,
+        bool                            check_tensors,
         const llama_model_kv_override * param_overrides_p,
-        const llama_model_tensor_buft_override * param_tensor_buft_overrides_p);
+        const llama_model_tensor_buft_override * param_tensor_buft_overrides_p,
+        const llama_ondemand_params *            ondemand_params = nullptr);
 
-    template<typename T>
-    typename std::enable_if<std::is_integral<T>::value, bool>::type
-    get_arr_n(const std::string & key, T & result, bool required = true);
+    template <typename T>
+    typename std::enable_if<std::is_integral<T>::value, bool>::type get_arr_n(const std::string & key,
+                                                                              T &                 result,
+                                                                              bool                required = true);
 
-    template<typename T>
-    typename std::enable_if<std::is_integral<T>::value, bool>::type
-    get_arr_n(enum llm_kv kid, T & result, bool required = true);
+    template <typename T>
+    typename std::enable_if<std::is_integral<T>::value, bool>::type get_arr_n(enum llm_kv kid,
+                                                                              T &         result,
+                                                                              bool        required = true);
 
-    template<typename T>
-    bool get_arr(const std::string & key, std::vector<T> & result, bool required = true);
+    template <typename T> bool get_arr(const std::string & key, std::vector<T> & result, bool required = true);
 
-    template<typename T, size_t N_MAX>
+    template <typename T, size_t N_MAX>
     bool get_arr(const std::string & key, std::array<T, N_MAX> & result, bool required = true);
 
-    template<typename T>
-    bool get_arr(enum llm_kv kid, T & result, bool required = true);
+    template <typename T> bool get_arr(enum llm_kv kid, T & result, bool required = true);
 
-    template<typename T>
-    bool get_key(const std::string & key, T & result, bool required = true);
+    template <typename T> bool get_key(const std::string & key, T & result, bool required = true);
 
-    template<typename T>
-    bool get_key(enum llm_kv kid, T & result, bool required = true);
+    template <typename T> bool get_key(enum llm_kv kid, T & result, bool required = true);
 
-    template<typename T, size_t N_MAX>
+    template <typename T, size_t N_MAX>
     bool get_key_or_arr(const std::string & key, std::array<T, N_MAX> & result, uint32_t n, bool required = true);
 
-    template<typename T>
-    bool get_key_or_arr(enum llm_kv kid, T & result, uint32_t n, bool required = true);
+    template <typename T> bool get_key_or_arr(enum llm_kv kid, T & result, uint32_t n, bool required = true);
 
     std::string get_arch_name() const;
 
@@ -141,15 +151,28 @@ struct llama_model_loader {
 
     struct ggml_tensor * require_tensor_meta(const std::string & name) const;
 
-    const struct ggml_tensor * check_tensor_dims(const std::string & name, const std::vector<int64_t> & ne, bool required) const;
+    const struct ggml_tensor * check_tensor_dims(const std::string &          name,
+                                                 const std::vector<int64_t> & ne,
+                                                 bool                         required) const;
 
-    struct ggml_tensor * create_tensor(struct ggml_context * ctx, const std::string & name, const std::initializer_list<int64_t> & ne, int flags = 0);
+    struct ggml_tensor * create_tensor(struct ggml_context *                  ctx,
+                                       const std::string &                    name,
+                                       const std::initializer_list<int64_t> & ne,
+                                       int                                    flags = 0);
 
-    struct ggml_tensor * create_tensor_as_view(struct ggml_context * ctx, struct ggml_tensor * base, const std::string & name, const std::initializer_list<int64_t> & ne, size_t offset, bool required = true);
+    struct ggml_tensor * create_tensor_as_view(struct ggml_context *                  ctx,
+                                               struct ggml_tensor *                   base,
+                                               const std::string &                    name,
+                                               const std::initializer_list<int64_t> & ne,
+                                               size_t                                 offset,
+                                               bool                                   required = true);
 
     void done_getting_tensors() const;
 
     void init_mappings(bool prefetch = true, llama_mlocks * mlock_mmaps = nullptr);
+
+    // Initialize on-demand loading (Linux only)
+    void init_mappings_ondemand(const llama_ondemand_params & params);
 
     void get_mapping_range(size_t * first, size_t * last, void ** addr, int idx, ggml_context * ctx) const;
 
@@ -157,12 +180,11 @@ struct llama_model_loader {
     void load_data_for(struct ggml_tensor * cur) const;
 
     // Returns false if cancelled by progress_callback
-    bool load_all_data(
-            struct ggml_context * ctx,
-            llama_buf_map & bufs,
-            llama_mlocks * lmlocks,
-            llama_progress_callback progress_callback,
-            void * progress_callback_user_data);
+    bool load_all_data(struct ggml_context *   ctx,
+                       llama_buf_map &         bufs,
+                       llama_mlocks *          lmlocks,
+                       llama_progress_callback progress_callback,
+                       void *                  progress_callback_user_data);
 
     std::string ftype_name() const;
 

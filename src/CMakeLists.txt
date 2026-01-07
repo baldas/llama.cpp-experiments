@@ -29,7 +29,9 @@ add_library(llama
             llama-model-loader.cpp
             llama-model-saver.cpp
             llama-model.cpp
+            llama-ondemand.cpp
             llama-quant.cpp
+
             llama-sampling.cpp
             llama-vocab.cpp
             unicode-data.cpp
