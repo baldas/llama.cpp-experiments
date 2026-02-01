@@ -423,6 +423,8 @@ struct common_params {
 
     ggml_type cache_type_k = GGML_TYPE_F16; // KV cache data type for the K
     ggml_type cache_type_v = GGML_TYPE_F16; // KV cache data type for the V
+    
+    std::string kv_cache_mmap_path = "";     // path for mmap-backed KV cache (empty = disabled, CPU-only)
 
     common_conversation_mode conversation_mode = COMMON_CONVERSATION_MODE_AUTO;
 

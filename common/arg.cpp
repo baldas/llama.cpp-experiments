@@ -1667,6 +1667,15 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
             params.cache_type_v = kv_cache_type_from_str(value);
         }
     ).set_env("LLAMA_ARG_CACHE_TYPE_V"));
+                
+    add_opt(common_arg({ "--kv-cache-mmap" }, "FILE",
+                       "use mmap for KV cache backed by specified file (CPU-only, slower on HDD)",
+        [](common_params & params, const std::string & value) {
+                           params.kv_cache_mmap_path = value;
+                           params.no_kv_offload      = true;  // mmap KV cache requires CPU-only operation
+          }
+    ).set_env("LLAMA_ARG_KV_CACHE_MMAP"));
+
     add_opt(common_arg(
         {"--hellaswag"},
         "compute HellaSwag score over random tasks from datafile supplied with -f",

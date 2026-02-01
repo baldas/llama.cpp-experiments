@@ -20,6 +20,9 @@ struct llama_memory_params {
 
     // use full-size SWA cache
     bool swa_full;
+    
+    // mmap-backed KV cache (CPU-only)
+    const char * kv_cache_mmap_path;
 };
 
 enum llama_memory_status {

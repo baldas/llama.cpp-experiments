@@ -29,6 +29,7 @@ llama_kv_cache::llama_kv_cache(
                  uint32_t   n_pad,
                  uint32_t   n_swa,
            llama_swa_type   swa_type,
+             const char *   mmap_path,
     const layer_filter_cb & filter,
     const  layer_reuse_cb & reuse) :
     model(model), hparams(model.hparams), v_trans(v_trans),
@@ -174,16 +175,85 @@ llama_kv_cache::llama_kv_cache(
     }
 
     // allocate tensors and initialize the buffers to avoid NaNs in the padding
-    for (auto & [buft, ctx] : ctx_map) {
-        ggml_backend_buffer_t buf = ggml_backend_alloc_ctx_tensors_from_buft(ctx.get(), buft);
-        if (!buf) {
-            throw std::runtime_error("failed to allocate buffer for kv cache");
+    // Check if mmap is requested
+    if (mmap_path != nullptr && mmap_path[0] != '\0') {
+        // CPU-only check: mmap only works when KV cache is not offloaded
+        if (offload) {
+            throw std::runtime_error("--kv-cache-mmap is only supported for CPU (use -ngl 0)");
         }
 
-        LLAMA_LOG_INFO("%s: %10s KV buffer size = %8.2f MiB\n", __func__, ggml_backend_buffer_name(buf), ggml_backend_buffer_get_size(buf)/1024.0/1024.0);
+        // Calculate total size needed for all contexts (only non-view tensors)
+        size_t total_size = 0;
+        for (auto & [buft, ctx] : ctx_map) {
+            for (ggml_tensor * t = ggml_get_first_tensor(ctx.get()); t != nullptr;
+                 t               = ggml_get_next_tensor(ctx.get(), t)) {
+                // Skip view tensors - they share memory with their source
+                if (t->view_src != nullptr) {
+                    continue;
+                }
+                total_size += ggml_nbytes(t);
+            }
+        }
 
-        ggml_backend_buffer_clear(buf, 0);
-        ctxs_bufs.emplace_back(std::move(ctx), buf);
+        // Create mmap storage
+        mmap_storage = std::make_unique<llama_kv_cache_mmap>(mmap_path, total_size);
+
+        LLAMA_LOG_INFO("%s: using mmap-backed KV cache from '%s' (%.2f MiB)\n", __func__, mmap_path,
+                       total_size / 1024.0 / 1024.0);
+
+        // Create buffer from mmap pointer for each context
+        size_t offset = 0;
+        for (auto & [buft, ctx] : ctx_map) {
+            // Calculate size for this context (only non-view tensors)
+            size_t ctx_size = 0;
+            for (ggml_tensor * t = ggml_get_first_tensor(ctx.get()); t != nullptr;
+                 t               = ggml_get_next_tensor(ctx.get(), t)) {
+                // Skip view tensors - they share memory with their source
+                if (t->view_src != nullptr) {
+                    continue;
+                }
+                ctx_size += ggml_nbytes(t);
+            }
+
+            // Create CPU buffer from mmap pointer at current offset
+            ggml_backend_buffer_t buf =
+                ggml_backend_cpu_buffer_from_ptr(static_cast<char *>(mmap_storage->data()) + offset, ctx_size);
+
+            if (!buf) {
+                throw std::runtime_error("failed to create mmap buffer for kv cache");
+            }
+
+            // Allocate tensors in this buffer (only non-view tensors)
+            ggml_tallocr alloc = ggml_tallocr_new(buf);
+            for (ggml_tensor * t = ggml_get_first_tensor(ctx.get()); t != nullptr;
+                 t               = ggml_get_next_tensor(ctx.get(), t)) {
+                // Skip view tensors - they share memory with their source
+                if (t->view_src != nullptr) {
+                    continue;
+                }
+                ggml_tallocr_alloc(&alloc, t);
+            }
+
+            LLAMA_LOG_INFO("%s: %10s KV buffer size = %8.2f MiB (mmap)\n", __func__, ggml_backend_buffer_name(buf),
+                           ctx_size / 1024.0 / 1024.0);
+
+            ggml_backend_buffer_clear(buf, 0);
+            ctxs_bufs.emplace_back(std::move(ctx), buf);
+            offset += ctx_size;
+        }
+    } else {
+        // Standard allocation path
+        for (auto & [buft, ctx] : ctx_map) {
+            ggml_backend_buffer_t buf = ggml_backend_alloc_ctx_tensors_from_buft(ctx.get(), buft);
+            if (!buf) {
+                throw std::runtime_error("failed to allocate buffer for kv cache");
+            }
+
+            LLAMA_LOG_INFO("%s: %10s KV buffer size = %8.2f MiB\n", __func__, ggml_backend_buffer_name(buf), ggml_backend_buffer_get_size(buf)/1024.0/1024.0);
+
+            ggml_backend_buffer_clear(buf, 0);
+            ctxs_bufs.emplace_back(std::move(ctx), buf);
+        }
     }
 
     {

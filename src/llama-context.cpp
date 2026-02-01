@@ -105,6 +105,7 @@ llama_context::llama_context(
 
     cparams.op_offload = params.op_offload;
     cparams.kv_unified = params.kv_unified;
+    cparams.kv_cache_mmap_path = params.kv_cache_mmap_path;
 
     {
         const char * LLAMA_GRAPH_REUSE_DISABLE = getenv("LLAMA_GRAPH_REUSE_DISABLE");
@@ -217,6 +218,7 @@ llama_context::llama_context(
             /*.type_k   =*/ params.type_k,
             /*.type_v   =*/ params.type_v,
             /*.swa_full =*/ params.swa_full,
+            /*.kv_cache_mmap_path  =*/cparams.kv_cache_mmap_path,
         };
 
         memory.reset(model.create_memory(params_mem, cparams));
@@ -2323,6 +2325,7 @@ llama_context_params llama_context_default_params() {
         /*.op_offload                  =*/ true,
         /*.swa_full                    =*/ true,
         /*.kv_unified                  =*/ false,
+        /*.kv_cache_mmap_path          =*/ nullptr,
     };
 
     return result;

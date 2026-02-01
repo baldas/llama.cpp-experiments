@@ -2,6 +2,7 @@
 
 #include "llama-batch.h"
 #include "llama-graph.h"
+#include "llama-kv-cache-mmap.h"
 #include "llama-kv-cells.h"
 #include "llama-memory.h"
 
@@ -88,6 +89,7 @@ public:
                      uint32_t   n_pad,
                      uint32_t   n_swa,
                llama_swa_type   swa_type,
+                 const char *   mmap_path,
         const layer_filter_cb & filter,
         const  layer_reuse_cb & reuse);
 
@@ -214,6 +216,9 @@ private:
 
     // this is the SWA type of the cache - not to be confused with the model SWA type
     const llama_swa_type swa_type = LLAMA_SWA_TYPE_NONE;
+    
+    // mmap storage for KV cache (if using --kv-cache-mmap)
+    std::unique_ptr<llama_kv_cache_mmap> mmap_storage;
 
     // ggml contexts for the KV cache along with the allocated backend buffers:
     std::vector<std::pair<ggml_context_ptr, ggml_backend_buffer_ptr>> ctxs_bufs;
