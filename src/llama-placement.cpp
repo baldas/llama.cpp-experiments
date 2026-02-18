@@ -174,16 +174,11 @@ class PmemWeightStore {
 #    define MAP_SHARED_VALIDATE 0x03
 #endif
 
-        //int flags = MAP_SHARED_VALIDATE | MAP_SYNC;   // we don't need
-        // persistency
+        //int flags = MAP_SHARED_VALIDATE | MAP_SYNC;
         int flags = MAP_SHARED;
         addr_     = mmap(NULL, required_size, PROT_READ | PROT_WRITE, flags, fd_, 0);
-        if (addr_ == MAP_FAILED) {
-          perror("mmap failed");
-          return false;
-        }
 
-        /*
+        /* 
         if (addr_ == MAP_FAILED) {
             // Fallback for non-DAX filesystems (dev/testing)
             LP_LOG_ERROR("mmap with MAP_SYNC failed. Is this a DAX filesystem? Falling back to standard MAP_SHARED.");
@@ -226,44 +221,11 @@ class PmemWeightStore {
 };
 
 // --------------------------------------------------------------------------
-// GGUF tensor offset lookup
-// --------------------------------------------------------------------------
-
-struct GgufContextWrapper {
-    gguf_context * ctx = nullptr;
-
-    GgufContextWrapper(const char * path) {
-        struct gguf_init_params params = {
-            /*.no_alloc = */ true,
-            /*.ctx      = */ nullptr,
-        };
-        ctx = gguf_init_from_file(path, params);
-    }
-
-    ~GgufContextWrapper() {
-        if (ctx) {
-            gguf_free(ctx);
-        }
-    }
-
-    uint64_t get_tensor_offset(const char * name) {
-        int idx = gguf_find_tensor(ctx, name);
-        if (idx < 0) {
-            return -1;
-        }
-        return gguf_get_data_offset(ctx) + gguf_get_tensor_offset(ctx, idx);
-    }
-};
-
-// --------------------------------------------------------------------------
 // Main Placement Logic
 // --------------------------------------------------------------------------
 
-int llama_apply_layer_placement(struct llama_model * model,
-                                const char *         gguf_path,
-                                const char *         pmem_path,
-                                const char *         config_str) {
-    if (!model || !gguf_path || !pmem_path || !config_str) {
+int llama_apply_layer_placement(struct llama_model * model, const char * pmem_path, const char * config_str) {
+    if (!model || !pmem_path || !config_str) {
         return -1;
     }
 
@@ -276,29 +238,12 @@ int llama_apply_layer_placement(struct llama_model * model,
     }
 
     // 2. Identify tensors to move and calculate required pmem size
-    // 5. Place Tensors
     size_t bytes_dram_attn    = 0;
     size_t bytes_dram_ffn     = 0;
     size_t bytes_dram_other   = 0;
     size_t bytes_optane_attn  = 0;
     size_t bytes_optane_ffn   = 0;
     size_t bytes_optane_other = 0;
-
-    // Helper to categorize tensors (very rough, could be improved by tracking usage in loop 2)
-    // Actually, we can't easily map back from tensor* to category unless we tracked it.
-    // Let's just track total DRAM vs Optane for now, and maybe rough category totals if possible.
-    // Since we just want total summary for now as requested by user ("DRAM vs Optane breakdown for attention and FFN separately"),
-    // we should track it during the "check_tensor" phase or just track it here by knowing what we are processing.
-    // BUT calculate loop 2 already pushed to "tensors_to_process" without category info.
-    // Re-factor: Let's store category in tensors_to_process or just run the placement loop directly on model tensors again?
-    // Running directly is risky if we have duplicates (shared tensors).
-    // Better: Add a "category" enum to tensors_to_process.
-
-    // Let's Refactor Loop 2 and 5 to be one pass or carry metadata.
-    // Actually, the simplest way is to just do the placement inside the loop over layers/tensors directly,
-    // instead of building a list.
-    // BUT we need to calculate total size first to init the PmemWeightStore.
-    // So we DO need two passes.
 
     enum TensorCategory { CAT_EMBED, CAT_ATTN, CAT_FFN, CAT_OUTPUT, CAT_OTHER };
 
@@ -383,19 +328,7 @@ int llama_apply_layer_placement(struct llama_model * model,
         }
     }
 
-    // 4. Open GGUF file for reading data
-    int gguf_fd = open(gguf_path, O_RDONLY);
-    if (gguf_fd < 0) {
-        LP_LOG_ERROR("Failed to open GGUF file: %s", gguf_path);
-        if (pmem) {
-            delete pmem;
-        }
-        return -1;
-    }
-
-    // Helper to find offsets
-    GgufContextWrapper gguf_meta(gguf_path);
-
+    // 4. Place tensors — copy from loaded data (preserves REPACK layout)
     for (auto & item : placement_list) {
         ggml_tensor *   t      = std::get<0>(item);
         TensorPlacement p      = std::get<1>(item);
@@ -420,27 +353,18 @@ int llama_apply_layer_placement(struct llama_model * model,
             // 1. Allocate in pmem
             void * pmem_ptr = pmem->allocate(nbytes);
             if (!pmem_ptr) {
-                close(gguf_fd);
                 delete pmem;  // Unmaps logic
                 return -1;
             }
 
-            // 2. Read data from GGUF file to pmem
-            uint64_t file_offset = gguf_meta.get_tensor_offset(t->name);
-            if (file_offset == (uint64_t) -1) {
-                LP_LOG_ERROR("Failed to find tensor offset for %s", t->name);
-                continue;
-            }
+            // 2. Copy data from current location (DRAM or mmap) to pmem.
+            //    This preserves whatever layout the tensor has post-load,
+            //    including any CPU_REPACK transformations.
+            memcpy(pmem_ptr, t->data, nbytes);
 
-            ssize_t read_bytes = pread(gguf_fd, pmem_ptr, nbytes, file_offset);
-            if (read_bytes != (ssize_t) nbytes) {
-                LP_LOG_ERROR("Failed to read tensor data for %s", t->name);
-                close(gguf_fd);
-                delete pmem;
-                return -1;
-            }
-
-            // 3. Advise OS we don't need the original page cache for this range
+            // 3. Advise OS we don't need the original pages for this range.
+            //    For mmap-backed tensors this releases page cache; for
+            //    malloc-backed tensors this releases anonymous pages.
             uintptr_t old_addr         = (uintptr_t) t->data;
             size_t    page_size        = sysconf(_SC_PAGESIZE);
             uintptr_t old_addr_aligned = old_addr & ~(page_size - 1);
@@ -453,8 +377,6 @@ int llama_apply_layer_placement(struct llama_model * model,
             *tracker_optane += nbytes;
         }
     }
-
-    close(gguf_fd);
 
     auto to_mib = [](size_t b) {
         return b / (1024.0 * 1024.0);
@@ -471,20 +393,10 @@ int llama_apply_layer_placement(struct llama_model * model,
     LP_LOG_INFO("    Other:      %.2f MiB", to_mib(bytes_optane_other));
 
     if (pmem) {
-        // Important: Release ownership so it doesn't unmap on destruction of the pointer or program exit
-        // We want it to leak for the duration of the process.
+        // Release ownership so the mmap persists for the process lifetime
         pmem->release();
-        // We can safely delete the object wrapper now if it's just a file descriptor holder,
-        // but we need to keep the mapping.
-        // Wait, if I delete `pmem` (the pointer), the destructor calls `munmap` if strictly following C++.
-        // `pmem->release()` sets `should_unmap_ = false`, so `delete pmem` will NOT unmap, but WILL close fd.
-        // Closing fd is fine after mmap.
+        // We intentionally leak the PmemWeightStore* pointer — it's one per model load, negligible.
     }
-
-    // We intentionally do not delete pmem to be extra safe against any destructor logic if we change it later,
-    // but `delete pmem` with `release()` is cleaner.
-    // Actually, let's just leak the PmemWeightStore* pointer too. It's one pointer per model load. Negligible.
-    // (Or use a static vector to hold them if we wanted to be pedantic).
 
     return 0;
 }

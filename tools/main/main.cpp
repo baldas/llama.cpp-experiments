@@ -179,12 +179,8 @@ int main(int argc, char ** argv) {
     }
 
     if (!optane_placement.empty() && !optane_url.empty()) {
-        const char * gguf_path = params.model.path.c_str();
-        // Note: params.model.path might be determined by common_params_handle_model.
-        // If it was downloaded, it is the cache path.
-
         LOG_INF("%s: applying Optane placement...\n", __func__);
-        if (llama_apply_layer_placement(model, gguf_path, optane_url.c_str(), optane_placement.c_str()) != 0) {
+        if (llama_apply_layer_placement(model, optane_url.c_str(), optane_placement.c_str()) != 0) {
             LOG_ERR("%s: failed to apply Optane placement\n", __func__);
             return 1;
         }
